@@ -1,0 +1,58 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/dji/mavic/protos/Mavic2Pro.proto"
+
+WorldInfo {
+  defaultDamping Damping {
+  }
+}
+Viewpoint {
+  orientation -0.004144086921720179 0.9998825538813069 0.014754829290114976 0.5483603900229853
+  position -7.350300030079264 -0.10848901036796955 3.7071415168120048
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+Solid {
+  translation -0.04 -3.57 -0.12
+  children [
+    Shape {
+      appearance Appearance {
+        material Material {
+        }
+        texture ImageTexture {
+          url [
+            "../assets/circle.png"
+          ]
+        }
+        textureTransform TextureTransform {
+        }
+      }
+      geometry Box {
+        size 10 10 0.1
+      }
+    }
+  ]
+  name "ground"
+  boundingObject Box {
+    size 10 10 0.1
+  }
+}
+Mavic2Pro {
+  translation 0 0 0
+  controller "wes_drone_mavric"
+  controllerArgs [
+    ""
+  ]
+  cameraSlot [
+    Camera {
+      translation -3.67321e-08 0 -0.01
+      rotation 0 1 0 1.5708
+      width 400
+      height 240
+    }
+  ]
+}
