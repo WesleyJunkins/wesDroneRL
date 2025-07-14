@@ -144,6 +144,40 @@ int send_json_data(int sockfd, const char* json_data) {
     return bytes_sent;
 }
 
+// Function to receive JSON commands via UDP socket
+int receive_json_command(int sockfd, double* movement, double* yaw) {
+    char buffer[1024];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    
+    int bytes_received = recvfrom(sockfd, buffer, sizeof(buffer) - 1, MSG_DONTWAIT,
+                                 (struct sockaddr*)&client_addr, &client_len);
+    
+    if (bytes_received > 0) {
+        buffer[bytes_received] = '\0';  // Null terminate the string
+        
+        // Simple JSON parsing for movement and yaw values
+        // Expected format: {"movement": 0.5, "yaw": -0.3}
+        char* movement_ptr = strstr(buffer, "\"movement\":");
+        char* yaw_ptr = strstr(buffer, "\"yaw\":");
+        
+        if (movement_ptr) {
+            movement_ptr += 11;  // Skip "movement":
+            *movement = atof(movement_ptr);
+        }
+        
+        if (yaw_ptr) {
+            yaw_ptr += 6;  // Skip "yaw":
+            *yaw = atof(yaw_ptr);
+        }
+        
+        printf("*** RECEIVED COMMAND: movement=%.3f, yaw=%.3f ***\n", *movement, *yaw);
+        return bytes_received;
+    }
+    
+    return 0;  // No data received
+}
+
 int main(int argc, char **argv) {
   wb_robot_init();
   int timestep = (int)wb_robot_get_basic_time_step();
@@ -225,17 +259,18 @@ int main(int argc, char **argv) {
   double initial_yaw = 0.0;
   bool yaw_initialized = false;
   
-  // Initialize PID controllers with more aggressive parameters for early correction
+  // Initialize PID controllers with conservative parameters based on article insights
+  // Focus on rate control rather than position control to avoid integral windup
   struct PID position_x_pid = {
-    .Kp = 2.0,           // Increased proportional gain for faster response
-    .Ki = 0.05,          // Increased integral gain for better steady-state
-    .Kd = 0.3,           // Increased derivative gain for better damping
-    .Kaw = 0.1,          // Anti-windup gain
+    .Kp = 1.0,           // Conservative proportional gain
+    .Ki = 0.0,           // NO integral term to prevent windup and circular drift
+    .Kd = 0.1,           // Small derivative gain for damping
+    .Kaw = 0.0,          // No anti-windup needed without integral
     .T_C = 0.01,         // Derivative filter time constant
     .T = timestep / 1000.0, // Time step in seconds
-    .max = 3.0,          // Increased max command for stronger corrections
-    .min = -3.0,         // Increased min command for stronger corrections
-    .max_rate = 2.0,     // Increased max rate for faster response
+    .max = 1.5,          // Conservative max command
+    .min = -1.5,         // Conservative min command
+    .max_rate = 1.0,     // Conservative max rate
     .integral = 0.0,
     .err_prev = 0.0,
     .deriv_prev = 0.0,
@@ -244,15 +279,15 @@ int main(int argc, char **argv) {
   };
   
   struct PID position_y_pid = {
-    .Kp = 2.0,           // Increased proportional gain for faster response
-    .Ki = 0.05,          // Increased integral gain for better steady-state
-    .Kd = 0.3,           // Increased derivative gain for better damping
-    .Kaw = 0.1,          // Anti-windup gain
+    .Kp = 1.0,           // Conservative proportional gain
+    .Ki = 0.0,           // NO integral term to prevent windup and circular drift
+    .Kd = 0.1,           // Small derivative gain for damping
+    .Kaw = 0.0,          // No anti-windup needed without integral
     .T_C = 0.01,         // Derivative filter time constant
     .T = timestep / 1000.0, // Time step in seconds
-    .max = 3.0,          // Increased max command for stronger corrections
-    .min = -3.0,         // Increased min command for stronger corrections
-    .max_rate = 2.0,     // Increased max rate for faster response
+    .max = 1.5,          // Conservative max command
+    .min = -1.5,         // Conservative min command
+    .max_rate = 1.0,     // Conservative max rate
     .integral = 0.0,
     .err_prev = 0.0,
     .deriv_prev = 0.0,
@@ -261,15 +296,15 @@ int main(int argc, char **argv) {
   };
   
   struct PID yaw_pid = {
-    .Kp = 2.0,           // Increased proportional gain for faster response
-    .Ki = 0.05,          // Increased integral gain for better steady-state
-    .Kd = 0.3,           // Increased derivative gain for better damping
-    .Kaw = 0.1,          // Anti-windup gain
+    .Kp = 1.5,           // Conservative proportional gain for yaw
+    .Ki = 0.0,           // NO integral term to prevent windup
+    .Kd = 0.2,           // Small derivative gain for damping
+    .Kaw = 0.0,          // No anti-windup needed without integral
     .T_C = 0.01,         // Derivative filter time constant
     .T = timestep / 1000.0, // Time step in seconds
-    .max = 2.0,          // Increased max command for stronger corrections
-    .min = -2.0,         // Increased min command for stronger corrections
-    .max_rate = 1.0,     // Increased max rate for faster response
+    .max = 1.0,          // Conservative max command
+    .min = -1.0,         // Conservative min command
+    .max_rate = 0.5,     // Conservative max rate
     .integral = 0.0,
     .err_prev = 0.0,
     .deriv_prev = 0.0,
@@ -284,14 +319,25 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
   
+  // Bind socket to listen on the same port
+  struct sockaddr_in server_addr;
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(SOCKET_PORT);
+  server_addr.sin_addr.s_addr = INADDR_ANY;
+  
+  if (bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+    perror("Socket bind failed");
+    return EXIT_FAILURE;
+  }
+  
   // Set socket to non-blocking mode
   int flags = fcntl(sockfd, F_GETFL, 0);
   fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
   
-  // Variables for acceleration tracking
-  double prev_velocity_x = 0.0;
-  double prev_velocity_y = 0.0;
-  double prev_velocity_z = 0.0;
+  // Variables for velocity and acceleration tracking
+  double prev_position_x = 0.0;
+  double prev_position_y = 0.0;
+  double prev_position_z = 0.0;
   double dt = timestep / 1000.0;  // Time step in seconds
   
   // Variables for smooth setpoint updates
@@ -299,12 +345,38 @@ int main(int argc, char **argv) {
   static bool setpoint_updated = false;
   const double acceleration_threshold = 0.1;  // m/s² threshold for "nearly stopped"
   
-  // Acceleration limits to prevent continuous buildup
-  const double max_disturbance = 2.0;  // Maximum disturbance value
-  static double current_roll_disturbance = 0.0;
-  static double current_pitch_disturbance = 0.0;
-  static double current_yaw_disturbance = 0.0;
-  const double disturbance_ramp_rate = 0.5;  // How fast disturbances can increase per timestep
+  // Variables for yaw change detection
+  static double previous_yaw = 0.0;
+  static bool yaw_changed_significantly = false;
+  const double yaw_change_threshold = 0.1;  // Radians threshold for significant yaw change
+  
+  // Variables for settling time and stability detection
+  static double settling_start_time = 0.0;
+  static bool settling_period_active = false;
+  const double settling_time = 1.0;  // Seconds to wait after disturbances stop before updating setpoints
+  const double velocity_threshold = 0.05;  // m/s threshold for "nearly stopped"
+  
+  // Waypoint control system - discrete movement commands
+  const double waypoint_distance = 0.5;  // Meters to move per command
+  const double waypoint_yaw_change = 0.5;  // Radians to rotate per command (~28.6 degrees)
+  static bool waypoint_active = false;
+  static double waypoint_target_x = 0.0;
+  static double waypoint_target_y = 0.0;
+  static double waypoint_target_yaw = 0.0;
+  static bool waypoint_reached = false;
+  const double waypoint_tolerance = 0.1;  // Meters tolerance for position
+  const double yaw_tolerance = 0.1;  // Radians tolerance for yaw
+  
+  // Command timing system - disable stabilization for 3 seconds after receiving commands
+  static double last_command_time = 0.0;
+  const double command_timeout = 3.0;  // Seconds to wait after command before re-enabling stabilization
+  
+  // Persistent movement and yaw command system
+  static double current_movement_command = 0.0;  // Current movement velocity (persistent until new command)
+  static double current_yaw_command = 0.0;       // Current yaw target (persistent until new command)
+  static bool yaw_target_active = false;         // Whether we're actively rotating to a yaw target
+  static double yaw_target = 0.0;                // Target yaw angle to rotate to
+  const double yaw_target_tolerance = 0.1;       // Radians tolerance for yaw target
 
   // Main control loop
   while (wb_robot_step(timestep) != -1) {
@@ -320,24 +392,34 @@ int main(int argc, char **argv) {
     const double current_x = wb_gps_get_values(gps)[0];
     const double current_y = wb_gps_get_values(gps)[1];
 
-    // Calculate acceleration from velocity changes
-    double current_velocity_x = (current_x - prev_velocity_x) / dt;
-    double current_velocity_y = (current_y - prev_velocity_y) / dt;
-    double current_velocity_z = (altitude - prev_velocity_z) / dt;
+    // Calculate velocity from position changes (only after first iteration)
+    double current_velocity_x = 0.0;
+    double current_velocity_y = 0.0;
+    double current_velocity_z = 0.0;
     
-    double acceleration_x = (current_velocity_x - prev_velocity_x) / dt;
-    double acceleration_y = (current_velocity_y - prev_velocity_y) / dt;
-    double acceleration_z = (current_velocity_z - prev_velocity_z) / dt;
+    if (position_initialized) {
+      current_velocity_x = (current_x - prev_position_x) / dt;
+      current_velocity_y = (current_y - prev_position_y) / dt;
+      current_velocity_z = (altitude - prev_position_z) / dt;
+    }
     
-    // Clamp acceleration values to prevent infinite values in JSON
+    // Calculate acceleration from velocity changes (simplified)
+    double acceleration_x = 0.0;
+    double acceleration_y = 0.0;
+    double acceleration_z = 0.0;
+    
+    // Clamp velocity and acceleration values to prevent infinite values
+    current_velocity_x = CLAMP(current_velocity_x, -10.0, 10.0);
+    current_velocity_y = CLAMP(current_velocity_y, -10.0, 10.0);
+    current_velocity_z = CLAMP(current_velocity_z, -10.0, 10.0);
     acceleration_x = CLAMP(acceleration_x, -100.0, 100.0);
     acceleration_y = CLAMP(acceleration_y, -100.0, 100.0);
     acceleration_z = CLAMP(acceleration_z, -100.0, 100.0);
     
-    // Update previous velocities for next iteration
-    prev_velocity_x = current_velocity_x;
-    prev_velocity_y = current_velocity_y;
-    prev_velocity_z = current_velocity_z;
+    // Update previous positions for next iteration
+    prev_position_x = current_x;
+    prev_position_y = current_y;
+    prev_position_z = altitude;
 
     // Initialize position reference on first iteration
     if (!position_initialized) {
@@ -352,6 +434,7 @@ int main(int argc, char **argv) {
     if (!yaw_initialized) {
       initial_yaw = yaw;
       setpoint_yaw = yaw;  // Set target to current yaw
+      previous_yaw = yaw;  // Initialize previous yaw for change detection
       yaw_initialized = true;
     }
 
@@ -369,164 +452,243 @@ int main(int argc, char **argv) {
       takeoff_complete = true;
     }
 
-    // Keyboard control - use disturbances like the original controller with limits
-    double target_roll_disturbance = 0.0;
-    double target_pitch_disturbance = 0.0;
-    double target_yaw_disturbance = 0.0;
+    // Receive JSON commands via UDP
+    double received_movement = 0.0;
+    double received_yaw = 0.0;
+    int bytes_received = receive_json_command(sockfd, &received_movement, &received_yaw);
+    
+    // Process received commands
+    if (bytes_received > 0) {
+      last_command_time = time;
+      printf("*** COMMAND TIMER RESET: %.3f ***\n", last_command_time);
+      
+      // Process movement command (additive) - only add if not zero
+      if (received_movement != 0.0) {
+        current_movement_command += received_movement;
+        printf("*** MOVEMENT COMMAND: %.3f (total: %.3f) ***\n", received_movement, current_movement_command);
+      }
+      
+      // Process yaw command (additive) - only add if not zero
+      if (received_yaw != 0.0) {
+        current_yaw_command += received_yaw;
+        yaw_target = current_yaw_command;  // Set new yaw target
+        yaw_target_active = true;          // Activate yaw targeting
+        printf("*** YAW COMMAND: %.3f (total: %.3f) - Target set to %.3f ***\n", received_yaw, current_yaw_command, yaw_target);
+      }
+    }
+    
+    // Keyboard control - discrete waypoint commands
     int key = wb_keyboard_get_key();
     while (key > 0) {
-      switch (key) {
-        case WB_KEYBOARD_UP:
-          target_pitch_disturbance = -max_disturbance;
-          break;
-        case WB_KEYBOARD_DOWN:
-          target_pitch_disturbance = max_disturbance;
-          break;
-        case WB_KEYBOARD_RIGHT:
-          target_yaw_disturbance = -max_disturbance;
-          break;
-        case WB_KEYBOARD_LEFT:
-          target_yaw_disturbance = max_disturbance;
-          break;
-        case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_RIGHT):
-          target_roll_disturbance = -max_disturbance;
-          break;
-        case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_LEFT):
-          target_roll_disturbance = max_disturbance;
-          break;
-        case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_UP):
-          // Increase altitude
-          target_altitude += altitude_change;
-          break;
-        case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_DOWN):
-          // Decrease altitude
-          target_altitude -= altitude_change;
-          break;
+      if (!waypoint_active) {  // Only accept new commands if no waypoint is active
+        switch (key) {
+          case WB_KEYBOARD_UP:
+            // Move forward
+            waypoint_target_x = current_x + waypoint_distance * cos(yaw);
+            waypoint_target_y = current_y + waypoint_distance * sin(yaw);
+            waypoint_target_yaw = yaw;  // Keep current yaw
+            waypoint_active = true;
+            waypoint_reached = false;
+            printf("*** WAYPOINT SET: Forward to (%.3f, %.3f, %.3f) ***\n", waypoint_target_x, waypoint_target_y, waypoint_target_yaw);
+            break;
+          case WB_KEYBOARD_DOWN:
+            // Move backward
+            waypoint_target_x = current_x - waypoint_distance * cos(yaw);
+            waypoint_target_y = current_y - waypoint_distance * sin(yaw);
+            waypoint_target_yaw = yaw;  // Keep current yaw
+            waypoint_active = true;
+            waypoint_reached = false;
+            printf("*** WAYPOINT SET: Backward to (%.3f, %.3f, %.3f) ***\n", waypoint_target_x, waypoint_target_y, waypoint_target_yaw);
+            break;
+          case WB_KEYBOARD_LEFT:
+            // Rotate left
+            waypoint_target_x = current_x;  // Keep current position
+            waypoint_target_y = current_y;
+            waypoint_target_yaw = yaw + waypoint_yaw_change;
+            waypoint_active = true;
+            waypoint_reached = false;
+            printf("*** WAYPOINT SET: Rotate left to yaw %.3f ***\n", waypoint_target_yaw);
+            break;
+          case WB_KEYBOARD_RIGHT:
+            // Rotate right
+            waypoint_target_x = current_x;  // Keep current position
+            waypoint_target_y = current_y;
+            waypoint_target_yaw = yaw - waypoint_yaw_change;
+            waypoint_active = true;
+            waypoint_reached = false;
+            printf("*** WAYPOINT SET: Rotate right to yaw %.3f ***\n", waypoint_target_yaw);
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_RIGHT):
+            // Strafe right
+            waypoint_target_x = current_x + waypoint_distance * cos(yaw + M_PI/2);
+            waypoint_target_y = current_y + waypoint_distance * sin(yaw + M_PI/2);
+            waypoint_target_yaw = yaw;  // Keep current yaw
+            waypoint_active = true;
+            waypoint_reached = false;
+            printf("*** WAYPOINT SET: Strafe right to (%.3f, %.3f, %.3f) ***\n", waypoint_target_x, waypoint_target_y, waypoint_target_yaw);
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_LEFT):
+            // Strafe left
+            waypoint_target_x = current_x + waypoint_distance * cos(yaw - M_PI/2);
+            waypoint_target_y = current_y + waypoint_distance * sin(yaw - M_PI/2);
+            waypoint_target_yaw = yaw;  // Keep current yaw
+            waypoint_active = true;
+            waypoint_reached = false;
+            printf("*** WAYPOINT SET: Strafe left to (%.3f, %.3f, %.3f) ***\n", waypoint_target_x, waypoint_target_y, waypoint_target_yaw);
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_UP):
+            // Increase altitude
+            target_altitude += altitude_change;
+            printf("*** ALTITUDE SET: %.3f ***\n", target_altitude);
+            break;
+          case (WB_KEYBOARD_SHIFT + WB_KEYBOARD_DOWN):
+            // Decrease altitude
+            target_altitude -= altitude_change;
+            printf("*** ALTITUDE SET: %.3f ***\n", target_altitude);
+            break;
+        }
       }
       key = wb_keyboard_get_key();
     }
     
-    // Ramp disturbances towards target values with limits
-    if (target_pitch_disturbance > current_pitch_disturbance) {
-      current_pitch_disturbance += disturbance_ramp_rate * dt;
-      if (current_pitch_disturbance > target_pitch_disturbance) {
-        current_pitch_disturbance = target_pitch_disturbance;
-      }
-    } else if (target_pitch_disturbance < current_pitch_disturbance) {
-      current_pitch_disturbance -= disturbance_ramp_rate * dt;
-      if (current_pitch_disturbance < target_pitch_disturbance) {
-        current_pitch_disturbance = target_pitch_disturbance;
-      }
-    }
-    
-    if (target_roll_disturbance > current_roll_disturbance) {
-      current_roll_disturbance += disturbance_ramp_rate * dt;
-      if (current_roll_disturbance > target_roll_disturbance) {
-        current_roll_disturbance = target_roll_disturbance;
-      }
-    } else if (target_roll_disturbance < current_roll_disturbance) {
-      current_roll_disturbance -= disturbance_ramp_rate * dt;
-      if (current_roll_disturbance < target_roll_disturbance) {
-        current_roll_disturbance = target_roll_disturbance;
+    // Waypoint control system - check if waypoint is reached
+    if (waypoint_active && !waypoint_reached) {
+      // Calculate distance to waypoint
+      double distance_to_waypoint = sqrt(pow(current_x - waypoint_target_x, 2) + pow(current_y - waypoint_target_y, 2));
+      
+      // Calculate yaw error (handle wrapping)
+      double yaw_error = waypoint_target_yaw - yaw;
+      while (yaw_error > M_PI) yaw_error -= 2 * M_PI;
+      while (yaw_error < -M_PI) yaw_error += 2 * M_PI;
+      double yaw_distance = fabs(yaw_error);
+      
+      // Check if waypoint is reached
+      if (distance_to_waypoint < waypoint_tolerance && yaw_distance < yaw_tolerance) {
+        waypoint_reached = true;
+        printf("*** WAYPOINT REACHED: (%.3f, %.3f, %.3f) ***\n", current_x, current_y, yaw);
       }
     }
     
-    if (target_yaw_disturbance > current_yaw_disturbance) {
-      current_yaw_disturbance += disturbance_ramp_rate * dt;
-      if (current_yaw_disturbance > target_yaw_disturbance) {
-        current_yaw_disturbance = target_yaw_disturbance;
+    // Yaw target system - check if yaw target is reached
+    if (yaw_target_active) {
+      // Calculate yaw error to target (handle wrapping)
+      double yaw_error_to_target = yaw_target - yaw;
+      while (yaw_error_to_target > M_PI) yaw_error_to_target -= 2 * M_PI;
+      while (yaw_error_to_target < -M_PI) yaw_error_to_target += 2 * M_PI;
+      double yaw_distance_to_target = fabs(yaw_error_to_target);
+      
+      // Check if yaw target is reached
+      if (yaw_distance_to_target < yaw_target_tolerance) {
+        yaw_target_active = false;
+        printf("*** YAW TARGET REACHED: %.3f (current: %.3f) ***\n", yaw_target, yaw);
       }
-    } else if (target_yaw_disturbance < current_yaw_disturbance) {
-      current_yaw_disturbance -= disturbance_ramp_rate * dt;
-      if (current_yaw_disturbance < target_yaw_disturbance) {
-        current_yaw_disturbance = target_yaw_disturbance;
-      }
     }
     
-    // Decay disturbances when no keys are pressed
-    if (fabs(target_roll_disturbance) < 0.1) {
-      current_roll_disturbance *= 0.9;  // Decay to zero
-    }
-    if (fabs(target_pitch_disturbance) < 0.1) {
-      current_pitch_disturbance *= 0.9;  // Decay to zero
-    }
-    if (fabs(target_yaw_disturbance) < 0.1) {
-      current_yaw_disturbance *= 0.9;  // Decay to zero
+    // Detect significant yaw changes (for debugging)
+    double yaw_change = fabs(yaw - previous_yaw);
+    // Handle angle wrapping
+    if (yaw_change > M_PI) {
+      yaw_change = 2 * M_PI - yaw_change;
     }
     
-    // Use the limited disturbances
-    double roll_disturbance = current_roll_disturbance;
-    double pitch_disturbance = current_pitch_disturbance;
-    double yaw_disturbance = current_yaw_disturbance;
-
-    // Check if disturbances are nearly zero (drone is not being actively controlled)
-    bool disturbances_zeroed = (fabs(roll_disturbance) < 0.1 && 
-                               fabs(pitch_disturbance) < 0.1 && 
-                               fabs(yaw_disturbance) < 0.1);
+    if (yaw_change > yaw_change_threshold) {
+      yaw_changed_significantly = true;
+    }
     
-    // Print disturbance values for debugging
-    printf("Disturbances - Roll: %.3f, Pitch: %.3f, Yaw: %.3f | Zeroed: %s | Takeoff complete: %s | Setpoints - X: %.3f, Y: %.3f, Yaw: %.3f\n", 
-           roll_disturbance, pitch_disturbance, yaw_disturbance, 
-           disturbances_zeroed ? "YES" : "NO", 
-           takeoff_complete ? "YES" : "NO",
+    // Waypoint-based control logic - update setpoints when waypoint is reached
+    bool waypoint_complete = waypoint_active && waypoint_reached;
+    
+    // Update setpoints when waypoint is reached
+    if (waypoint_complete && !setpoint_updated && position_initialized && yaw_initialized) {
+      // Waypoint reached, update setpoints to current position and yaw
+      setpoint_x = current_x;
+      setpoint_y = current_y;
+      setpoint_yaw = yaw;
+      setpoint_updated = true;
+      
+      // Reset waypoint system
+      waypoint_active = false;
+      waypoint_reached = false;
+      
+      printf("*** SETPOINTS UPDATED: X=%.3f, Y=%.3f, Yaw=%.3f ***\n", setpoint_x, setpoint_y, setpoint_yaw);
+    }
+    
+    // Check if we're within the command timeout period
+    bool command_recently_received = (time - last_command_time) < command_timeout;
+    
+    // Position stabilization - disabled when waypoint is active OR when command recently received OR when movement command is active
+    bool should_stabilize_position = position_initialized && 
+                                    (!waypoint_active && !command_recently_received && current_movement_command == 0.0) || !takeoff_complete;  // Stabilize when no waypoint active AND no recent commands AND no movement command OR during takeoff
+    
+    // Yaw stabilization - disabled when waypoint is active OR when command recently received OR when yaw target is active
+    bool should_stabilize_yaw = yaw_initialized && 
+                                (!waypoint_active && !command_recently_received && !yaw_target_active) || !takeoff_complete;  // Stabilize when no waypoint active AND no recent commands AND no yaw target active OR during takeoff
+    
+    // Print waypoint status for debugging
+    printf("Waypoint - Active: %s | Reached: %s | Target: (%.3f, %.3f, %.3f) | Current: (%.3f, %.3f, %.3f) | Command Timer: %.1fs | Movement: %.3f | Yaw Target: %s (%.3f) | Stabilizing - Pos: %s, Yaw: %s | Setpoints - X: %.3f, Y: %.3f, Yaw: %.3f\n", 
+           waypoint_active ? "YES" : "NO", 
+           waypoint_reached ? "YES" : "NO",
+           waypoint_target_x, waypoint_target_y, waypoint_target_yaw,
+           current_x, current_y, yaw,
+           time - last_command_time,
+           current_movement_command,
+           yaw_target_active ? "YES" : "NO", yaw_target,
+           should_stabilize_position ? "YES" : "NO",
+           should_stabilize_yaw ? "YES" : "NO",
            setpoint_x, setpoint_y, setpoint_yaw);
     
-    // Position stabilization (X,Y) - when disturbances are zeroed OR during takeoff
-    // This is separate from altitude, roll, pitch, yaw stabilization which should always be active
-    bool should_stabilize_position = position_initialized && 
-                                    (disturbances_zeroed || !takeoff_complete);  // Stabilize when not controlled OR during takeoff
-    
     // Only apply position correction when conditions are met
+    // Use simple proportional control to avoid integral windup issues
     double position_correction_x = 0.0;
     double position_correction_y = 0.0;
     
     if (should_stabilize_position) {
-      // PID control for X position (forward/backward)
-      position_correction_x = -PID_Step(&position_x_pid, current_x, setpoint_x);
+      // Simple proportional control for X position (forward/backward)
+      double x_error = setpoint_x - current_x;
+      position_correction_x = -position_x_pid.Kp * CLAMP(x_error, -1.0, 1.0);
       
-      // PID control for Y position (left/right)
-      position_correction_y = PID_Step(&position_y_pid, current_y, setpoint_y);
-    } else {
-      // Reset PID integrators when disturbances are active
-      position_x_pid.integral = 0.0;
-      position_y_pid.integral = 0.0;
+      // Simple proportional control for Y position (left/right)
+      double y_error = setpoint_y - current_y;
+      position_correction_y = position_y_pid.Kp * CLAMP(y_error, -1.0, 1.0);
+    } else if (current_movement_command != 0.0) {
+      // Apply movement command - forward/backward movement in drone's frame
+      position_correction_x = current_movement_command;
+      printf("*** APPLYING MOVEMENT: %.3f ***\n", current_movement_command);
     }
     
-    // Update setpoints to current position when control stops (disturbances become zero)
-    bool is_controlled = !disturbances_zeroed;
-    
-    if (was_controlled && !is_controlled && !setpoint_updated && position_initialized) {
-      // Control stopped, update setpoints to current position
-      setpoint_x = current_x;
-      setpoint_y = current_y;
-      setpoint_updated = true;
-    }
-    
-    // Reset setpoint update flag when control becomes active again
-    if (is_controlled) {
-      setpoint_updated = false;
-    }
-    
-    was_controlled = is_controlled;
-
-    // Yaw stabilization - keep heading fixed using PID control
+    // Yaw stabilization - keep heading fixed using simple proportional control
     double yaw_correction = 0.0;
     
-    if (yaw_initialized && fabs(yaw_disturbance) < 0.1) {
-      // Only apply yaw correction when no yaw disturbance is active
+    if (should_stabilize_yaw) {
       // Calculate yaw error (handle angle wrapping)
-      double yaw_error = yaw - setpoint_yaw;
+      double yaw_error = setpoint_yaw - yaw;
       
       // Normalize yaw error to [-π, π]
       while (yaw_error > M_PI) yaw_error -= 2 * M_PI;
       while (yaw_error < -M_PI) yaw_error += 2 * M_PI;
       
-      // PID control for yaw using normalized error
-      yaw_correction = PID_Step(&yaw_pid, yaw, setpoint_yaw);
-    } else {
-      // Reset yaw PID integrator when disturbance is active
-      yaw_pid.integral = 0.0;
+      // Simple proportional control for yaw
+      yaw_correction = yaw_pid.Kp * CLAMP(yaw_error, -1.0, 1.0);
+    } else if (yaw_target_active) {
+      // Apply yaw target command - rotate to target yaw
+      double yaw_error_to_target = yaw_target - yaw;
+      
+      // Normalize yaw error to [-π, π]
+      while (yaw_error_to_target > M_PI) yaw_error_to_target -= 2 * M_PI;
+      while (yaw_error_to_target < -M_PI) yaw_error_to_target += 2 * M_PI;
+      
+      // Proportional control to reach yaw target
+      yaw_correction = yaw_pid.Kp * CLAMP(yaw_error_to_target, -1.0, 1.0);
+      printf("*** APPLYING YAW TARGET: %.3f (error: %.3f) ***\n", yaw_target, yaw_error_to_target);
     }
+    
+    // Reset setpoint update flag when waypoint becomes active
+    if (waypoint_active) {
+      setpoint_updated = false;
+    }
+    
+    // Update previous yaw for next iteration
+    previous_yaw = yaw;
 
     // Create and send JSON data via socket
     char json_buffer[1024];
@@ -543,11 +705,11 @@ int main(int argc, char **argv) {
     }
 
     // Compute control inputs for stabilization
-    // Altitude, roll, pitch, and yaw stabilization are ALWAYS active
-    // Position stabilization (X,Y) is only active when conditions are met
-    const double roll_input = k_roll_p * CLAMP(roll, -1.0, 1.0) + roll_velocity + roll_disturbance + position_correction_y;
-    const double pitch_input = k_pitch_p * CLAMP(pitch, -1.0, 1.0) + pitch_velocity + pitch_disturbance + position_correction_x;
-    const double yaw_input = yaw_disturbance + yaw_correction; // Yaw stabilization always active
+    // Altitude, roll, and pitch stabilization are ALWAYS active
+    // Position (X,Y) and yaw stabilization are only active when conditions are met
+    const double roll_input = k_roll_p * CLAMP(roll, -1.0, 1.0) + roll_velocity + position_correction_y;
+    const double pitch_input = k_pitch_p * CLAMP(pitch, -1.0, 1.0) + pitch_velocity + position_correction_x;
+    const double yaw_input = yaw_correction; // Yaw stabilization conditional
 
     // Compute vertical control input (altitude stabilization always active)
     const double altitude_error = target_altitude - altitude + k_vertical_offset;
@@ -572,3 +734,4 @@ int main(int argc, char **argv) {
   wb_robot_cleanup();
   return EXIT_SUCCESS;
 }
+//WES
