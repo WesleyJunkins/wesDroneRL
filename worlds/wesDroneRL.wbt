@@ -44,7 +44,4 @@ Solid {
 Mavic2Pro {
   translation 0 0 0
   controller "wes_flight_controller"
-  controllerArgs [
-    ""
-  ]
 }

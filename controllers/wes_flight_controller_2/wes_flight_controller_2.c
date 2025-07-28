@@ -24,25 +24,25 @@
 // Tunable Values --------------------------------------------------------------
 // -----------------------------------------------------------------------------
 
-// PID Constants (Tunable)
-#define KP_ROLL 25.0
+// PID Constants (Tunable) - MUCH MORE CONSERVATIVE
+#define KP_ROLL 2.0  // Reduced from 8.0
 #define KI_ROLL 0.0
-#define KD_ROLL 3.0
+#define KD_ROLL 0.2  // Reduced from 1.0
 
-#define KP_PITCH 25.0
+#define KP_PITCH 3.0
 #define KI_PITCH 0.0
-#define KD_PITCH 3.0
+#define KD_PITCH 0.5
 
-#define KP_YAW 10.0
+#define KP_YAW 2.0   // Reduced from 5.0
 #define KI_YAW 0.0
-#define KD_YAW 1.0
+#define KD_YAW 0.2   // Reduced from 0.5
 
-#define KP_Z 40.0
-#define KI_Z 0.5
-#define KD_Z 15.0
+#define KP_Z 8.0     // Reduced from 15.0
+#define KI_Z 0.05    // Reduced from 0.1
+#define KD_Z 2.0     // Reduced from 4.0
 
 // Motor Constants (Tunable)
-#define HOVER_THRUST 55.0
+#define HOVER_THRUST 68.0
 #define MAX_THRUST 100.0
 #define MIN_THRUST -100.0
 
@@ -180,7 +180,6 @@ int main(int argc, char **argv) {
   double target_pos_x = 0.0;
   double target_pos_y = 0.0;
   double target_pos_z = 0.0;
-  double hover_thrust = HOVER_THRUST;
   double base_thrust = 0.0;
 
   // PID Variables
@@ -257,11 +256,11 @@ int main(int argc, char **argv) {
   // Command line check for tuning
   if (argc > 1) {
     if (strcmp(argv[1], "--tune=twiddle") == 0) {
-      tune_pid_twiddle(imu_tuning, gps_tuning, motor_tuning, timestep);
+      tune_pid_twiddle(imu_tuning, gps_tuning, motor_tuning);
       wb_robot_cleanup();
       return 0;
     } else if (strcmp(argv[1], "--tune=zn") == 0) {
-      tune_pid_ziegler_nichols(imu_tuning, gps_tuning, motor_tuning, timestep);
+      tune_pid_ziegler_nichols(imu_tuning, gps_tuning, motor_tuning);
       wb_robot_cleanup();
       return 0;
     }
@@ -298,12 +297,12 @@ int main(int argc, char **argv) {
   pos_z = gps_values[2];
 
   // Set initial target values to current position and orientation
-  target_roll = roll;
-  target_pitch = pitch;
-  target_yaw = yaw;
+  target_roll = 0.0;  // Target level roll
+  target_pitch = -0.07; // Target the natural pitch offset to prevent drift
+  target_yaw = yaw;   // Keep current yaw
   target_pos_x = pos_x;
   target_pos_y = pos_y;
-  target_pos_z = pos_z;
+  target_pos_z = pos_z + 0.5; // Start with 0.5 meter above current position (more conservative)
 
   // Main loop
   while (wb_robot_step(timestep) != -1) {
@@ -377,25 +376,21 @@ int main(int argc, char **argv) {
     CLAMP_INTEGRAL(integral_z);
     derivative_z = (error_z - prev_error_z) / dt;
     output_z = kp_z * error_z + ki_z * integral_z + kd_z * derivative_z;
+    output_z = CLAMP(output_z, -20.0, 20.0); // Limit altitude output
     prev_error_z = error_z;
 
-    // Roll PID
+    // Roll PID - WITH TRIM COMPENSATION
     error_roll = target_roll - roll;
     integral_roll += error_roll * dt;
     CLAMP_INTEGRAL(integral_roll);
     derivative_roll = (error_roll - prev_error_roll) / dt;
     output_roll = kp_roll * error_roll + ki_roll * integral_roll +
                   kd_roll * derivative_roll;
+    output_roll = CLAMP(output_roll, -10.0, 10.0); // Limit roll output
     prev_error_roll = error_roll;
 
-    // Pitch PID
-    error_pitch = target_pitch - pitch;
-    integral_pitch += error_pitch * dt;
-    CLAMP_INTEGRAL(integral_pitch);
-    derivative_pitch = (error_pitch - prev_error_pitch) / dt;
-    output_pitch = kp_pitch * error_pitch + ki_pitch * integral_pitch +
-                   kd_pitch * derivative_pitch;
-    prev_error_pitch = error_pitch;
+    // Pitch PID - COMPLETELY DISABLED (causes instability)
+    output_pitch = 0.0; // No pitch control - let drone find natural angle
 
     // Yaw PID
     error_yaw = target_yaw - yaw;
@@ -404,21 +399,22 @@ int main(int argc, char **argv) {
     derivative_yaw = (error_yaw - prev_error_yaw) / dt;
     output_yaw =
         kp_yaw * error_yaw + ki_yaw * integral_yaw + kd_yaw * derivative_yaw;
+    output_yaw = CLAMP(output_yaw, -5.0, 5.0); // Limit yaw output
     prev_error_yaw = error_yaw;
 
     // -------------------------------------------------------------------------
     // -------------------------------------------------------------------------
 
-    // Motor control
-    base_thrust = hover_thrust + output_z;
-    thrust_fl = CLAMP(base_thrust + output_pitch + output_roll - output_yaw,
-                      MIN_THRUST, MAX_THRUST);
-    thrust_fr = CLAMP(base_thrust + output_pitch - output_roll + output_yaw,
-                      MIN_THRUST, MAX_THRUST);
-    thrust_rl = CLAMP(base_thrust - output_pitch + output_roll + output_yaw,
-                      MIN_THRUST, MAX_THRUST);
-    thrust_rr = CLAMP(base_thrust - output_pitch - output_roll - output_yaw,
-                      MIN_THRUST, MAX_THRUST);
+    // Motor control - WITH ROLL TRIM COMPENSATION
+    base_thrust = HOVER_THRUST + output_z;
+    
+    // Add roll trim compensation (negative to counteract right roll)
+    double roll_trim = -0.5; // Reduced from -1.0 - less aggressive trim
+    
+    thrust_fl = CLAMP(base_thrust + output_roll + roll_trim, MIN_THRUST, MAX_THRUST);
+    thrust_fr = CLAMP(base_thrust - output_roll - roll_trim, MIN_THRUST, MAX_THRUST);
+    thrust_rl = CLAMP(base_thrust + output_roll + roll_trim, MIN_THRUST, MAX_THRUST);
+    thrust_rr = CLAMP(base_thrust - output_roll - roll_trim, MIN_THRUST, MAX_THRUST);
     wb_motor_set_velocity(front_left_motor, thrust_fl);
     wb_motor_set_velocity(front_right_motor, -thrust_fr);
     wb_motor_set_velocity(rear_left_motor, -thrust_rl);

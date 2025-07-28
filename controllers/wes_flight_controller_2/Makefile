@@ -65,9 +65,6 @@
 ###
 ###-----------------------------------------------------------------------------
 
-# Add PID controller source file
-C_SOURCES = wes_flight_controller.c pid_controller.c
-
 ### Do not modify: this includes Webots global Makefile.include
 null :=
 space := $(null) $(null)
