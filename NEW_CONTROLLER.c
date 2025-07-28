@@ -117,8 +117,8 @@
    double kd_x = 1.0;
    double kp_z = 1.0;
    double kd_z = 1.0;
-   double kp_altitude = 3;
-   double kd_altitude = 10;
+   double kp_altitude = 1.0;
+   double kd_altitude = 2.0;
    double kp_yaw = 0.5;  // Reduced from 1.0
    double kd_yaw = 0.5;  // Reduced from 1.0
    double error_x = 0;
@@ -235,11 +235,12 @@
      d_error_altitude = error_altitude - last_error_altitude;
      last_error_altitude = error_altitude;
      vertical_input = (kp_altitude*error_altitude) + (kd_altitude*d_error_altitude);
+     vertical_input = CLAMP(vertical_input, -10.0, 10.0);
      
      // PD Control for Rotation
      error_yaw = target_yaw - yaw;
      d_error_yaw = error_yaw - last_error_yaw;
-     const double yaw_input = kp_yaw*CLAMP(error_yaw, -1.0, 1.0) + kd_yaw*d_error_yaw + 2.0*yaw_acceleration + yaw_disturbance;  // Added yaw rate feedback
+     const double yaw_input = kp_yaw*CLAMP(error_yaw, -1.0, 1.0) + kd_yaw*d_error_yaw - 1.0*yaw_acceleration + yaw_disturbance;  // Added yaw rate feedback
      last_error_yaw = error_yaw;
  
      // Clamp control inputs to prevent runaway
@@ -276,6 +277,8 @@
        roll_input, pitch_input, vertical_input, clamped_yaw_input,
        yaw_acceleration, target_yaw
      );
+     printf("altitude: %.2f, target_altitude: %.2f, error_altitude: %.2f, vertical_input: %.2f\n", altitude, target_altitude, error_altitude, vertical_input);
+     printf("yaw: %.2f, target_yaw: %.2f, error_yaw: %.2f, yaw_input: %.2f, yaw_rate: %.2f\n", yaw, target_yaw, error_yaw, clamped_yaw_input, yaw_acceleration);
    };
  
    wb_robot_cleanup();
